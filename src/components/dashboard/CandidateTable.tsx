@@ -80,11 +80,12 @@ export default function CandidatesTable() {
       .then(({ data }) => setCandidates(data ?? []))
     
     const channel = supabase
-      .channel("realtime:candidates")
+      .channel("schema-db-changes")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "candidates" },
         (payload) => {
+          console.log(payload)
           setCandidates((prev) => {
             switch (payload.eventType) {
               case "INSERT":
@@ -103,9 +104,6 @@ export default function CandidatesTable() {
       )
       .subscribe()
     
-    return () => {
-      supabase.removeChannel(channel)
-    }
   }, [])
 
   const updateStatus = async (id: string, newStatus: string) => {
