@@ -60,8 +60,7 @@ export function SignupForm({ ...props }: React.ComponentProps<typeof Card>) {
     
       if (error) toast.error(error.message)
       else {
-        toast.success("Account created successfully, you will be redirected to dashboard shortly!")
-        setTimeout(() => navigate("/login"), 2000)
+        navigate("/confirm-email")
       }
   }
   const navigate = useNavigate();
