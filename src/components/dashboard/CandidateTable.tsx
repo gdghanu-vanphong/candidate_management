@@ -37,9 +37,9 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
-import { MoreHorizontal, CalendarIcon } from "lucide-react"
+import { MoreHorizontal, CalendarIcon, ArrowUpDown } from "lucide-react"
 import { supabase } from "@/lib/supabase"
-import { format, isAfter, isBefore, parseISO } from "date-fns"
+import { format, isAfter, isBefore, parseISO, startOfDay, endOfDay } from "date-fns"
 import { cn } from "@/lib/utils"
 
 type Candidate = {
@@ -48,20 +48,29 @@ type Candidate = {
   applied_position: string
   status: string | null
   resume_url: string | null
-  created_at: string 
+  created_at: string
 }
 
 const STATUS_FLOW = ["New", "Interviewing", "Hired", "Rejected"] as const
+
+type SortKey = "full_name" | "applied_position" | "status" | "created_at"
 
 export default function CandidatesTable() {
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [isDeleteOpen, setIsDeleteOpen] = useState(false)
-  const [searchName, setSearchName] = useState("")
-  const [searchPosition, setSearchPosition] = useState("")
+  const [searchTerm, setSearchTerm] = useState("")
   const [selectedStatus, setSelectedStatus] = useState<string | undefined>(undefined)
   const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined)
   const [dateTo, setDateTo] = useState<Date | undefined>(undefined)
+  const [sortKey, setSortKey] = useState<SortKey>("created_at")
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc")
+  const [currentData, setCurrentData] = useState<Candidate[]>([])
+  const [afterCursor, setAfterCursor] = useState<string | null>(null)
+  const [beforeCursor, setBeforeCursor] = useState<string | null>(null)
+  const [hasNext, setHasNext] = useState(false)
+  const [hasPrev, setHasPrev] = useState(false)
+  const pageSize = 10
 
   useEffect(() => {
     supabase
@@ -69,8 +78,7 @@ export default function CandidatesTable() {
       .select("id, full_name, applied_position, status, resume_url, created_at")
       .order("created_at", { ascending: false })
       .then(({ data }) => setCandidates(data ?? []))
-
-    // Realtime subscription
+    
     const channel = supabase
       .channel("realtime:candidates")
       .on(
@@ -94,7 +102,7 @@ export default function CandidatesTable() {
         }
       )
       .subscribe()
-
+    
     return () => {
       supabase.removeChannel(channel)
     }
@@ -114,36 +122,129 @@ export default function CandidatesTable() {
     setIsDeleteOpen(false)
   }
 
-  const filteredCandidates = useMemo(() => {
-    return candidates.filter((c) => {
-      const nameMatch = c.full_name.toLowerCase().includes(searchName.toLowerCase())
-      const positionMatch = c.applied_position.toLowerCase().includes(searchPosition.toLowerCase())
+  const comparator = (a: Candidate, b: Candidate): number => {
+    let aVal: string | number = ""
+    let bVal: string | number = ""
+    switch (sortKey) {
+      case "full_name":
+        aVal = a.full_name.toLowerCase()
+        bVal = b.full_name.toLowerCase()
+        break
+      case "applied_position":
+        aVal = a.applied_position.toLowerCase()
+        bVal = b.applied_position.toLowerCase()
+        break
+      case "status":
+        aVal = (a.status ?? "New").toLowerCase()
+        bVal = (b.status ?? "New").toLowerCase()
+        break
+      case "created_at":
+        aVal = parseISO(a.created_at).getTime()
+        bVal = parseISO(b.created_at).getTime()
+        break
+    }
+    let cmp = aVal > bVal ? 1 : aVal < bVal ? -1 : 0
+    if (sortDir === "desc") cmp = -cmp
+    if (cmp === 0) {
+      return a.id > b.id ? 1 : a.id < b.id ? -1 : 0
+    }
+    return cmp
+  }
+
+  const sortedCandidates = useMemo(() => {
+    const filtered = candidates.filter((c) => {
+      const termLower = searchTerm.toLowerCase()
+      const textMatch =
+        !termLower ||
+        c.full_name.toLowerCase().includes(termLower) ||
+        c.applied_position.toLowerCase().includes(termLower) ||
+        (c.status ?? "New").toLowerCase().includes(termLower)
       const statusMatch = selectedStatus ? (c.status ?? "New") === selectedStatus : true
       const createdDate = parseISO(c.created_at)
-      const fromMatch = dateFrom ? isAfter(createdDate, dateFrom) || createdDate.toDateString() === dateFrom.toDateString() : true
-      const toMatch = dateTo ? isBefore(createdDate, dateTo) || createdDate.toDateString() === dateTo.toDateString() : true
-
-      return nameMatch && positionMatch && statusMatch && fromMatch && toMatch
-    }).sort((a, b) => {
-      const aNameScore = Math.abs(a.full_name.length - searchName.length)
-      const bNameScore = Math.abs(b.full_name.length - searchName.length)
-      return aNameScore - bNameScore
+      const fromMatch = dateFrom
+        ? isAfter(createdDate, startOfDay(dateFrom)) ||
+          createdDate.getTime() === startOfDay(dateFrom).getTime()
+        : true
+      const toMatch = dateTo
+        ? isBefore(createdDate, endOfDay(dateTo)) ||
+          createdDate.getTime() === endOfDay(dateTo).getTime()
+        : true
+      return textMatch && statusMatch && fromMatch && toMatch
     })
-  }, [candidates, searchName, searchPosition, selectedStatus, dateFrom, dateTo])
+    return [...filtered].sort(comparator)
+  }, [candidates, searchTerm, selectedStatus, dateFrom, dateTo, sortKey, sortDir])
+
+  useEffect(() => {
+    loadFirstPage()
+  }, [sortedCandidates])
+
+  const loadFirstPage = () => {
+    const data = sortedCandidates.slice(0, pageSize)
+    setCurrentData(data)
+    setHasPrev(false)
+    setHasNext(data.length === pageSize)
+    if (data.length > 0) {
+      setBeforeCursor(data[0].id)
+      setAfterCursor(data[data.length - 1].id)
+    } else {
+      setBeforeCursor(null)
+      setAfterCursor(null)
+    }
+  }
+
+  const loadNextPage = () => {
+    if (!afterCursor) return
+    const cursorIndex = sortedCandidates.findIndex((c) => c.id === afterCursor)
+    if (cursorIndex === -1) {
+      loadFirstPage() 
+      return
+    }
+    const start = cursorIndex + 1
+    const data = sortedCandidates.slice(start, start + pageSize)
+    setCurrentData(data)
+    setHasNext(data.length === pageSize)
+    setHasPrev(true)
+    if (data.length > 0) {
+      setBeforeCursor(data[0].id)
+      setAfterCursor(data[data.length - 1].id)
+    }
+  }
+
+  const loadPrevPage = () => {
+    if (!beforeCursor) return
+    const cursorIndex = sortedCandidates.findIndex((c) => c.id === beforeCursor)
+    if (cursorIndex === -1) {
+      loadFirstPage() 
+      return
+    }
+    const end = cursorIndex
+    const start = Math.max(0, end - pageSize)
+    const data = sortedCandidates.slice(start, end)
+    setCurrentData(data)
+    setHasPrev(start > 0)
+    setHasNext(true) 
+    if (data.length > 0) {
+      setBeforeCursor(data[0].id)
+      setAfterCursor(data[data.length - 1].id)
+    }
+  }
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc")
+    } else {
+      setSortKey(key)
+      setSortDir("asc")
+    }
+  }
 
   return (
     <>
       <div className="flex flex-wrap gap-4 mb-4">
         <Input
-          placeholder="Search by name"
-          value={searchName}
-          onChange={(e) => setSearchName(e.target.value)}
-          className="max-w-xs"
-        />
-        <Input
-          placeholder="Search by position"
-          value={searchPosition}
-          onChange={(e) => setSearchPosition(e.target.value)}
+          placeholder="Search by name, position, or status"
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
           className="max-w-xs"
         />
         <Select value={selectedStatus} onValueChange={setSelectedStatus}>
@@ -202,24 +303,56 @@ export default function CandidatesTable() {
           </PopoverContent>
         </Popover>
       </div>
-
-      {/* Table */}
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="text-center">Full Name</TableHead>
-            <TableHead className="text-center">Applied Position</TableHead>
-            <TableHead className="text-center">Status</TableHead>
+            <TableHead
+              className="text-center cursor-pointer"
+              onClick={() => handleSort("full_name")}
+            >
+              Full Name{" "}
+              {sortKey === "full_name" && (
+                <ArrowUpDown className="inline-block h-4 w-4" />
+              )}
+            </TableHead>
+            <TableHead
+              className="text-center cursor-pointer"
+              onClick={() => handleSort("applied_position")}
+            >
+              Applied Position{" "}
+              {sortKey === "applied_position" && (
+                <ArrowUpDown className="inline-block h-4 w-4" />
+              )}
+            </TableHead>
+            <TableHead
+              className="text-center cursor-pointer"
+              onClick={() => handleSort("status")}
+            >
+              Status{" "}
+              {sortKey === "status" && (
+                <ArrowUpDown className="inline-block h-4 w-4" />
+              )}
+            </TableHead>
+            <TableHead
+              className="text-center cursor-pointer"
+              onClick={() => handleSort("created_at")}
+            >
+              Date Applied{" "}
+              {sortKey === "created_at" && (
+                <ArrowUpDown className="inline-block h-4 w-4" />
+              )}
+            </TableHead>
             <TableHead className="text-center">CV</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {filteredCandidates.map((c) => (
+          {currentData.map((c) => (
             <TableRow key={c.id}>
               <TableCell className="font-medium">{c.full_name}</TableCell>
               <TableCell>{c.applied_position}</TableCell>
               <TableCell>{c.status ?? "New"}</TableCell>
+              <TableCell>{format(parseISO(c.created_at), "PPP")}</TableCell>
               <TableCell>
                 {c.resume_url ? (
                   <a
@@ -265,8 +398,14 @@ export default function CandidatesTable() {
           ))}
         </TableBody>
       </Table>
-
-      {/* Delete Confirmation Dialog (moved outside for better handling) */}
+      <div className="flex justify-end gap-2 mt-4">
+        <Button disabled={!hasPrev} onClick={loadPrevPage}>
+          Previous
+        </Button>
+        <Button disabled={!hasNext} onClick={loadNextPage}>
+          Next
+        </Button>
+      </div>
       <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
